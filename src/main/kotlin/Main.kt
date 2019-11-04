@@ -36,8 +36,7 @@ fun main(args:Array<String>) {
             .option("dateFormat", "dd.MM.yy HH:mm")
             .schema(datasetSchema)
             .csv(datasetPath)
-    dataset.show(20)
-    dataset.printSchema()
 
+    dataset.printSchema()
 
 }
