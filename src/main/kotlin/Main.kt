@@ -35,7 +35,6 @@ fun main(args:Array<String>) {
     val dataset = spark.read()
             .format("csv")
             .option("header", "true")
-            .option("timestampFormat", "dd.MM.yy HH:mm")
             .schema(datasetSchema)
             .csv(datasetPath)
 
