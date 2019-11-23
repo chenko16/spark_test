@@ -1,61 +1,71 @@
 package ru.chenko
 
 import org.apache.spark.SparkConf
-import org.apache.spark.api.java.JavaSparkContext
-import org.apache.spark.sql.SaveMode
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions.*
 import org.apache.spark.sql.types.DataTypes
 import org.apache.spark.sql.types.StructType
+import org.apache.spark.streaming.api.java.JavaStreamingContext
+import scala.Console.println
 
 fun main(args:Array<String>) {
-    if(args.size < 2) {
-        println("Usage: java -jar jarName filePath byMinutesAggregate")
+    if(args.isEmpty()) {
+        println("Usage: java -jar jarName byMinutesAggregate")
         return
     }
-    val datasetPath = args[0]
-    val minutes = args[1].toInt();
+
+    val minutes = args[0].toInt()
 
     val conf:SparkConf = SparkConf()
             .setMaster("local")
             .setAppName("Kotlin Spark")
 
-    val sparkContext:JavaSparkContext = JavaSparkContext(conf)
+    var streamingContext:JavaStreamingContext = JavaStreamingContext(conf, org.apache.spark.streaming.Duration(60*1000));
 
     val spark:SparkSession = SparkSession
             .builder()
             .appName("Kotlin Spark")
             .orCreate
 
+    //Схема входных данных (метрик)
     val datasetSchema:StructType = DataTypes.createStructType(listOf(
             DataTypes.createStructField("id", DataTypes.IntegerType, false),
             DataTypes.createStructField("time", DataTypes.TimestampType, false),
             DataTypes.createStructField("value", DataTypes.FloatType, false)))
 
-    val dataset = spark.read()
-            .format("csv")
-            .option("header", "true")
-            .schema(datasetSchema)
-            .csv(datasetPath)
+    //Считываем данные из топика Kafka в датасет в режиме стрима
+    val dataset = spark.readStream()
+            .format("kafka")
+            .option("kafka.bootstrap.servers", "localhost:9092")
+            .option("subscribe", "spark")
+            .option("startingOffsets", "earliest")
+            .load()
 
-    dataset.printSchema()
+    //Вычленияем из считанных из Kafka данных интересующие нас данные (избавляемся от вложенности полей)
+    val metricDataset= dataset
+            .select(from_json(col("value").cast("string"), datasetSchema))
+            .withColumn("metric", col("jsontostructs(CAST(value AS STRING))"))
+            .drop("jsontostructs(CAST(value AS STRING))")
+            .select(col("metric.id"), col("metric.time"), col("metric.value"))
 
-
-    val windowDataset = dataset
-            .groupBy(col("id"), window(col("time"),"$minutes minutes"))
+    //Агрегируем данные по столбцу time и преобразуем результат к исходной структуре
+    val windowDataset = metricDataset
+            .withWatermark("time", "$minutes minutes")
+            .groupBy(col("id"), window(col("time"),"${minutes*2} minutes", "$minutes minutes"))
             .agg(avg("value").`as`("avg_value"))
             .withColumn("time", col("window.start"))
             .drop("window")
-            .sort(col("id"), col("time"))
             .select(col("id"), col("time"), col("avg_value"))
 
-
-    windowDataset.printSchema()
+    //Записываем результат в csv файл
     windowDataset
             .coalesce(1)
-            .write()
+            .writeStream()
             .format("csv")
-            .mode(SaveMode.Append)
-            .option("header", true)
-            .csv("result")
+            .option("checkpointLocation", "result/checkpoint/")
+            .option("path", "result/output/")
+            .option("format", "append")
+            .outputMode("append")
+            .start()
+            .awaitTermination()
 }
